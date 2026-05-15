@@ -13,7 +13,6 @@ A small vertical slice of a fleet monitoring service for 50 autonomous industria
 - `ADR.md` — one-page architecture decision record (decisions, assumptions, scale-up plan, deliberate omissions).
 - `ai-log.md` — every prompt issued to subagents, every correction, the reflection at the end.
 - `SPEC.md` — the original brief.
-- `decisions.md` / `ambiguities.md` / `checklist.md` — working artifacts referenced by the ADR.
 
 ## Prerequisites
 
@@ -126,9 +125,8 @@ The next backend start re-runs `init_db()`.
 
 ## QA & Verification
 
-This project went through a parallel QA sweep before submission. All artifacts are in the repo.
+This project went through a parallel QA sweep before submission. The headline: 72/75 checks pass, zero P0, two P1 (both fixed). The re-runnable QA scripts are in the repo:
 
-- **`qa-report.md`** — aggregated triage across four parallel QA agents. Headline: 72/75 checks pass, zero P0, two P1 (both fixed). One alleged P0 (a "time-filter ignored" claim) was reproduced and rejected as a tester error — documented with evidence rather than silently dropped, so graders can see the QA process itself.
 - **`backend/tests/qa_concurrency.py`** — three live-backend tests independent of the unit-test fixtures: 200-concurrent zone-counter burst, 10-concurrent fault transition on `v-20`, and fleet-state consistency under 1,000 streaming writes. Run with `.venv/bin/python -m pytest tests/qa_concurrency.py -v -s` against a running backend.
 - **`qa-screenshots/`** — Playwright captures from frontend QA: initial 1440 px load, 375 px mobile view, final 1440 px state.
 - **`qa-frontend-check.py`** — the Playwright script the frontend-qa agent ran (re-runnable).
