@@ -172,6 +172,7 @@ function VehicleList({ onTick }: { onTick: (when: Date) => void }) {
               return (
                 <tr
                   key={v.vehicle_id}
+                  data-testid={`vehicle-row-${v.vehicle_id}`}
                   className="border-t border-slate-100 hover:bg-slate-50"
                 >
                   <td className="px-4 py-2 font-mono text-slate-800">
@@ -185,7 +186,12 @@ function VehicleList({ onTick }: { onTick: (when: Date) => void }) {
                         }`}
                         aria-label={v.status}
                       />
-                      <span className="text-slate-700">{v.status}</span>
+                      <span
+                        data-testid={`vehicle-status-${v.vehicle_id}`}
+                        className="text-slate-700"
+                      >
+                        {v.status}
+                      </span>
                     </span>
                   </td>
                   <td className="px-4 py-2">
@@ -278,6 +284,7 @@ function ZoneCounts({ onTick }: { onTick: (when: Date) => void }) {
         {zones.map((z) => (
           <div
             key={z}
+            data-testid={`zone-card-${z}`}
             className={`border rounded px-3 py-2 transition-colors ${
               changed.has(z)
                 ? 'border-blue-400 bg-blue-50'
@@ -285,7 +292,10 @@ function ZoneCounts({ onTick }: { onTick: (when: Date) => void }) {
             }`}
           >
             <div className="text-xs text-slate-500 font-mono truncate">{z}</div>
-            <div className="text-xl font-semibold tabular-nums text-slate-800">
+            <div
+              data-testid={`zone-count-${z}`}
+              className="text-xl font-semibold tabular-nums text-slate-800"
+            >
               {counts[z]}
             </div>
           </div>
@@ -369,7 +379,10 @@ function App() {
             </span>
             <span>
               Last update:{' '}
-              <span className="font-mono tabular-nums text-slate-700">
+              <span
+                data-testid="last-updated"
+                className="font-mono tabular-nums text-slate-700"
+              >
                 {lastUpdated ? formatClock(lastUpdated) : '—'}
               </span>
             </span>

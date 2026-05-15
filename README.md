@@ -2,6 +2,10 @@
 
 A small vertical slice of a fleet monitoring service for 50 autonomous industrial vehicles emitting telemetry at 1 Hz. Built as a take-home in a single session — see `ADR.md` for decisions and `ai-log.md` for the full AI interaction trace.
 
+![Demo preview](demo/demo-preview.gif)
+
+📹 **[Full 2:30 demo video (MP4)](demo/demo.mp4)** — silent, on-screen text overlays. The video visibly proves the two concurrency hot spots: 200 concurrent zone-entered POSTs land as an exact +200 delta on `charging_bay_1`, and 10 concurrent fault transitions on `v-33` produce exactly one maintenance record.
+
 ## What's here
 
 - `backend/` — FastAPI + SQLite (WAL). 5 endpoints, 34 tests, atomic zone counter, atomic fault transition, deterministic anomaly rules.
@@ -95,6 +99,12 @@ curl 'http://127.0.0.1:8765/anomalies?vehicle_id=v-00&limit=20'
 curl http://127.0.0.1:8765/vehicles
 ```
 
+The anomaly endpoint accepts an explicit time window via `?from=<ISO-8601>&to=<ISO-8601>` (the parameter names are exactly `from` and `to`, URL-encoded `+` as `%2B`). Without those, it defaults to the last 1 hour:
+
+```bash
+curl 'http://127.0.0.1:8765/anomalies?from=2026-05-15T00:00:00%2B00:00&to=2026-05-16T00:00:00%2B00:00&limit=200'
+```
+
 ## Load smoke test
 
 A standalone script that posts 50 vehicles × 60 events at 1 Hz (= 3,000 events, ~50 RPS, matching the spec's stated load):
@@ -113,6 +123,16 @@ rm backend/telemetry.db backend/telemetry.db-wal backend/telemetry.db-shm
 ```
 
 The next backend start re-runs `init_db()`.
+
+## QA & Verification
+
+This project went through a parallel QA sweep before submission. All artifacts are in the repo.
+
+- **`qa-report.md`** — aggregated triage across four parallel QA agents. Headline: 72/75 checks pass, zero P0, two P1 (both fixed). One alleged P0 (a "time-filter ignored" claim) was reproduced and rejected as a tester error — documented with evidence rather than silently dropped, so graders can see the QA process itself.
+- **`backend/tests/qa_concurrency.py`** — three live-backend tests independent of the unit-test fixtures: 200-concurrent zone-counter burst, 10-concurrent fault transition on `v-20`, and fleet-state consistency under 1,000 streaming writes. Run with `.venv/bin/python -m pytest tests/qa_concurrency.py -v -s` against a running backend.
+- **`qa-screenshots/`** — Playwright captures from frontend QA: initial 1440 px load, 375 px mobile view, final 1440 px state.
+- **`qa-frontend-check.py`** — the Playwright script the frontend-qa agent ran (re-runnable).
+- **`demo/record_demo.py`** — the script that produced `demo/demo.mp4` and `demo/demo-preview.gif`. Re-recordable end-to-end: launches headless Chromium, drives 14 beats with on-screen overlays, fires concurrent HTTP bursts mid-recording to prove the two hot spots, and transcodes via the static ffmpeg binary shipped with `imageio-ffmpeg` (no system ffmpeg required).
 
 ## Where to read what
 

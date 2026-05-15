@@ -23,3 +23,7 @@ dist/
 
 # Logs
 *.log
+
+# Demo intermediates (deliverables are demo/demo.mp4 and demo/demo-preview.gif)
+demo/raw/
+demo/scrub-*.png

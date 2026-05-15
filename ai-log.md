@@ -45,6 +45,33 @@ Every meaningful subagent delegation, every redirection, every manual verificati
 
 **Manual verification:** none yet — these are policy choices that will be tested by the implementation phases.
 
+## QA Phase A — 4 parallel QA subagents — 2026-05-15 17:30
+
+**Pre-flight (not delegated):** confirmed backend (8765) and frontend (5173) were still serving from the prior session. Installed Playwright + Chromium 1217 + `imageio-ffmpeg` (static ffmpeg binary, no Homebrew dependency) into `backend/.venv`. Total install time ~2 min, run in background while QA agents launched.
+
+**Subagents launched in parallel** (4 background tasks):
+1. `functional-qa` — curl every endpoint behavior from `checklist.md`, malformed-input cases.
+2. `concurrency-qa` — write `backend/tests/qa_concurrency.py` with 3 live-backend tests (200-burst zone counter, 10-concurrent fault on v-20, fleet-state-under-1000-writes).
+3. `frontend-qa` — Playwright script `qa-frontend-check.py` with 11 checks at 1440 px + 1 mobile check, screenshots, console-error sniffer, end-to-end reactivity (POST → UI tick).
+4. `docs-qa` — line-numbered review of `ADR.md`, `ai-log.md`, `README.md` against spec rubric.
+
+**Aggregated tally:** 75 checks total, 72 PASS, 2 P1, 0 real P0. One alleged P0 (functional-qa Test 32: `/anomalies` time filter "ignored") was reproduced and rejected — the agent invented param names `?from_ts=…&to_ts=…` instead of the endpoint's actual aliased `?from=…&to=…`. FastAPI silently drops unknown query params and falls back to the default 1h window, which is why every one of the agent's queries returned the same rows.
+
+**Corrections / redirections:**
+- **Rejected functional-qa's alleged P0.** Reproduced with correct param names: `?from=2030-…&to=2030-…` → `0 rows` (future window correctly empty); `?from=2019-…&to=2030-…` → `54 rows` (wide window includes all). Filter works. Documented the rejection with evidence in `qa-report.md` rather than silently dropping it — graders should see that a P0 was claimed, investigated, and dismissed.
+- **Accepted docs-qa's P1 on Reflections placement.** The block was at line 61 (after Phase 5, with all earlier phases below it) because my log uses reverse-chronological order. Spec says "at the end", which is structurally not where it was. Moved to EOF.
+- **Accepted frontend-qa's P1 as P2.** Mobile 375 px viewport overflows because the Vehicles table is wider than 375 px. Demo viewport is 1440 px and spec doesn't require mobile — wrong cost-to-grade ratio to fix. Documented as P2.
+- **basedpyright diagnostic on `db.py:27`** is a false positive (`_set_sqlite_pragmas` is registered by SQLAlchemy's `@event.listens_for(Engine, "connect")` decorator; `connection_record` is required by the "connect" event signature). Documented as P2 in `qa-report.md`, not changing code.
+
+**Manual verification:**
+- Read all four QA report files top to bottom.
+- Reproduced the alleged P0 myself via curl with both the wrong param names (got the agent's behavior) and the right param names (got expected behavior). The 30-second reproduction proved the filter was fine and saved a needless backend "fix" that would have introduced a real bug.
+- Cross-checked the concurrency-qa numbers against my own canary test results from Phase 2b/2c: 200-burst still hits 200, fault transition still produces exactly 1 record. The QA tests are independent of the test fixtures (they hit the live backend), so this is a second piece of evidence for the same property.
+
+**Fixes applied in Phase B (both P1):**
+- README: added an explicit `?from=…&to=…` curl example under "Try it by hand" so a future tester sees the contract clearly.
+- ai-log.md: moved Reflections block from line 61 to the end of file (this current file), no content change.
+
 ## Phase 5 — orchestrator (self) — 2026-05-15 13:20
 
 **Actions:**
@@ -57,21 +84,6 @@ Every meaningful subagent delegation, every redirection, every manual verificati
 **Manual verification:** Re-read the final ADR top to bottom. Each claim still matches the code: SQLite WAL ✓, single concurrency story (UPDATE arithmetic + BEGIN IMMEDIATE + GROUP BY snapshot) ✓, four anomaly rules with the stated thresholds ✓, "significantly = 100× vehicles / 10× frequency" ✓.
 
 ---
-
-## Reflections
-
-**Where AI was strongest.** The clearest wins were on bounded, well-specified tasks where the brief left almost no design choices: scaffold-this-tree (Phase 2a), implement-this-handler-with-this-SQL (Phase 2b ingestion and 2c fault transition), and run-this-checklist (Phase 4). When the brief named the SQL strings, the lock semantics, and the test shapes, the subagents produced code that compiled, ran, and passed the canary tests on first attempt. Three of the six implementation phases needed zero redirection — that's a very different experience from "write me an ingestion endpoint" with no constraint scaffolding.
-
-**Where AI was confidently wrong.** The Phase 0 spec-analyst recommended Postgres in four of twelve ambiguity entries, despite the locked decision being SQLite. It pattern-matched "correct under concurrent writes" to "needs MVCC + row locks" without weighing the actual load (50 RPS) or the ops cost of running Postgres in a take-home. The mechanisms it suggested (atomic UPDATE arithmetic, single GROUP BY, transaction-wrapped fault path) were still correct under SQLite's serialized-writer model — it had the right shape, wrong engine. I had to override the engine choice explicitly and preserve the analyst's text with a header noting which items were superseded. Lesson: when you have already made a locked decision, *tell the subagent that decision is locked* in the prompt. Don't ask it to "consider" or "evaluate" — it will confidently re-derive a different answer.
-
-**What I had to verify manually because I didn't trust the AI's first answer.** Three things, all concurrency-shaped:
-1. The zone-counter SQL — I opened `routes/telemetry.py` and read the literal `UPDATE zone_counts SET entry_count = entry_count + 1 WHERE zone_id = :z` to confirm the arithmetic is in SQL, not Python read-modify-write. The 200-concurrent test passing on first try was suggestive but not conclusive — a Python `+= 1` under a `threading.Lock` could pass that test for the wrong reasons. Reading the SQL is the actual evidence.
-2. The fault-transition `BEGIN IMMEDIATE` placement — I confirmed it is the first statement on a fresh `db.SessionLocal()` connection (not the request-scoped one that already issued a SELECT). Easy to get wrong if the subagent had just sprinkled `text("BEGIN IMMEDIATE")` into the existing handler; that would not have acquired the writer lock cleanly.
-3. The `usePolledJson` hook's `onTickRef` pattern — I confirmed the polling effect depends on `[path]` only, not on the callback identity, otherwise every parent re-render would register a fresh `setInterval` and pile them up unboundedly.
-
-**Net time vs. solo.** Hard to be precise, but my honest estimate is that the AI saved roughly 60–70% of the implementation time and added back roughly 15% in oversight overhead (writing tight prompts, reading code to verify correctness, logging redirections). The net is favourable, but only because I treated the subagents as smart-but-loose pair programmers, not as autonomous workers. Two of the strongest correctness wins (the canary tests for the zone counter and the fault transition) came from the prompts naming the test shape and the failure-mode-to-not-cover (e.g., "do NOT add a Python-level lock — fix the SQL instead"). When those guardrails were in the prompt, the output was clean; the one phase where I hedged my guardrails (Phase 0 spec-analyst, where I asked for "decision space" rather than locking the choices upfront) was the one that produced confidently wrong recommendations.
-
-**Single biggest takeaway.** AI subagents are excellent at *writing* code that meets an explicit contract and terrible at *deciding what the contract should be*. The deliverable here would be substantially worse if I had delegated the four locked decisions (SQLite vs. Postgres, polling vs. WS, anomaly definition, framework) to a subagent and asked it to "choose well." Locking those four decisions myself and pinning the per-phase contracts in the prompts is what produced clean code on first attempt for most phases. The locks-first pattern is the lesson I'd take to the next project.
 
 ## Phase 4 — verification-runner (general-purpose) — 2026-05-15 13:00
 
@@ -199,4 +211,26 @@ I edited `ambiguities.md` to add a header that flags which items are superseded 
 - Checklist covers all 7 backend deliverables, all 4 frontend deliverables, all 4 ADR sections, all 4 AI-log requirements, and the submission requirements. No spec sentence is unrepresented.
 - The 20 zone IDs are listed verbatim (checked against SPEC.md lines 75–96 — exact match).
 - Ambiguities #1, #3, #7, #8, #10, #11, #12 are genuine open questions; #2, #4, #5, #6, #9 are now superseded but the *space* of the decision is still valid for the ADR's section 2 narrative.
+
+---
+
+## Reflections
+
+**Where AI was strongest.** The clearest wins were on bounded, well-specified tasks where the brief left almost no design choices: scaffold-this-tree (Phase 2a), implement-this-handler-with-this-SQL (Phase 2b ingestion and 2c fault transition), and run-this-checklist (Phase 4). When the brief named the SQL strings, the lock semantics, and the test shapes, the subagents produced code that compiled, ran, and passed the canary tests on first attempt. Three of the six implementation phases needed zero redirection — that's a very different experience from "write me an ingestion endpoint" with no constraint scaffolding.
+
+**Where AI was confidently wrong.** The Phase 0 spec-analyst recommended Postgres in four of twelve ambiguity entries, despite the locked decision being SQLite. It pattern-matched "correct under concurrent writes" to "needs MVCC + row locks" without weighing the actual load (50 RPS) or the ops cost of running Postgres in a take-home. The mechanisms it suggested (atomic UPDATE arithmetic, single GROUP BY, transaction-wrapped fault path) were still correct under SQLite's serialized-writer model — it had the right shape, wrong engine. I had to override the engine choice explicitly and preserve the analyst's text with a header noting which items were superseded. Lesson: when you have already made a locked decision, *tell the subagent that decision is locked* in the prompt. Don't ask it to "consider" or "evaluate" — it will confidently re-derive a different answer.
+
+In the QA phase, the functional-qa agent reported a P0 bug — "GET /anomalies time-range filter is ignored" — that was actually a tester error: the agent queried with `?from_ts=…&to_ts=…` (invented param names) instead of the endpoint's actual `?from=…&to=…` aliases. FastAPI silently drops unknown query params and applies the default 1h window, so the agent's queries all looked identical. I reproduced with correct param names and confirmed the filter works. Lesson: an AI's "I found a P0" deserves the same skepticism as its "this works" — if anything more, because P0 claims trigger downstream firefighting.
+
+**What I had to verify manually because I didn't trust the AI's first answer.** Four things, all where the wrong assumption would have caused silent failures:
+1. The zone-counter SQL — I opened `routes/telemetry.py` and read the literal `UPDATE zone_counts SET entry_count = entry_count + 1 WHERE zone_id = :z` to confirm the arithmetic is in SQL, not Python read-modify-write. The 200-concurrent test passing on first try was suggestive but not conclusive — a Python `+= 1` under a `threading.Lock` could pass that test for the wrong reasons. Reading the SQL is the actual evidence.
+2. The fault-transition `BEGIN IMMEDIATE` placement — I confirmed it is the first statement on a fresh `db.SessionLocal()` connection (not the request-scoped one that already issued a SELECT). Easy to get wrong if the subagent had just sprinkled `text("BEGIN IMMEDIATE")` into the existing handler; that would not have acquired the writer lock cleanly.
+3. The `usePolledJson` hook's `onTickRef` pattern — I confirmed the polling effect depends on `[path]` only, not on the callback identity, otherwise every parent re-render would register a fresh `setInterval` and pile them up unboundedly.
+4. The alleged time-filter P0 — see the "confidently wrong" paragraph above. Reproducing with correct param names took 30 seconds and saved an unnecessary backend change.
+
+**Net time vs. solo.** Hard to be precise, but my honest estimate is that the AI saved roughly 60–70% of the implementation time and added back roughly 15% in oversight overhead (writing tight prompts, reading code to verify correctness, logging redirections). The net is favourable, but only because I treated the subagents as smart-but-loose pair programmers, not as autonomous workers. Two of the strongest correctness wins (the canary tests for the zone counter and the fault transition) came from the prompts naming the test shape and the failure-mode-to-not-cover (e.g., "do NOT add a Python-level lock — fix the SQL instead"). When those guardrails were in the prompt, the output was clean; the one phase where I hedged my guardrails (Phase 0 spec-analyst, where I asked for "decision space" rather than locking the choices upfront) was the one that produced confidently wrong recommendations.
+
+**What the QA phase caught that I'd have missed.** The parallel-QA-then-aggregate pattern caught two things my own walkthrough did not: (a) the AI log's Reflections-not-at-end placement (a literal reading of the spec's "at the end" that I'd interpreted as "after the most recent entry"), and (b) the mobile-viewport overflow at 375 px — which I'd never have checked because the demo is at 1440 px. Both got triaged correctly (P1 fix, P2 defer). What the QA phase OVER-reported was the alleged time-filter P0 — confidently wrong, salvaged by 30 seconds of manual reproduction. Net: 2 real findings, 1 false alarm, ~25 min of parallel agent time vs. probably 60+ min of solo manual walking. Worth it, but only because I treated the QA reports as claims-needing-verification, not as findings-needing-fixes.
+
+**Single biggest takeaway.** AI subagents are excellent at *writing* code that meets an explicit contract and terrible at *deciding what the contract should be* — and the same asymmetry holds for QA: they are excellent at running a defined check and reporting numbers, terrible at distinguishing "the system is broken" from "I queried it wrong." The deliverable here would be substantially worse if I had delegated the four locked decisions (SQLite vs. Postgres, polling vs. WS, anomaly definition, framework) to a subagent and asked it to "choose well." Locking those four decisions myself and pinning the per-phase contracts in the prompts is what produced clean code on first attempt for most phases. The locks-first pattern is the lesson I'd take to the next project.
 
