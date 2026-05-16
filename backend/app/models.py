@@ -7,7 +7,7 @@ beyond ordering, which works fine lexicographically on ISO-8601.
 """
 from __future__ import annotations
 
-from sqlalchemy import Index, Integer, String, Float
+from sqlalchemy import Float, Index, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 

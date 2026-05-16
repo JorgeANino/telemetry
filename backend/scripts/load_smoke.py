@@ -2,7 +2,8 @@
 
 That's the spec's stated load (50 vehicles × 1 Hz = 50 events/s for 60 s =
 3000 events). We post via HTTP to a running uvicorn server (default
-http://127.0.0.1:8000) and verify after the run that:
+http://127.0.0.1:8765 — matches the project default) and verify after the
+run that:
 
   - Every request returned 202.
   - Telemetry row count == events posted.
@@ -14,26 +15,25 @@ across runs, so re-running this against an existing DB will accumulate counts.
 """
 from __future__ import annotations
 
+import os
 import random
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.request import Request, urlopen
 
-import os
-BASE_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8000")
+# Make the `app` package importable when invoking the script from any cwd.
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+from app.zones import ZONES  # noqa: E402  — single source of truth
+
+BASE_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8765")
 NUM_VEHICLES = 50
 EVENTS_PER_VEHICLE = 60
-ZONES = [
-    "inbound_dock_a", "inbound_dock_b", "receiving_staging",
-    "aisle_a", "aisle_b", "aisle_c",
-    "high_bay_1", "high_bay_2", "bulk_storage",
-    "pick_zone_1", "pick_zone_2", "pack_station", "sort_belt",
-    "outbound_dock_a", "outbound_dock_b", "shipping_staging",
-    "charging_bay_1", "charging_bay_2", "charging_bay_3",
-    "maintenance_bay",
-]
 
 
 def post_json(path: str, body: bytes) -> int:

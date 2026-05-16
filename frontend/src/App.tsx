@@ -1,18 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
-
-// --------------------------------------------------------------------------- //
-// Config                                                                      //
-// --------------------------------------------------------------------------- //
-
-// Per decisions.md §3, the dashboard polls three GETs every 2 seconds.
-const POLL_MS = 2000;
-
-// API base resolved from VITE_API_BASE so the grader can repoint without
-// rebuilding. Falls back to the conventional dev port for the backend.
-const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ??
-  'http://127.0.0.1:8765';
+import { API_BASE, POLL_MS, usePolledJson } from './usePolledJson';
 
 // --------------------------------------------------------------------------- //
 // Types — kept in this file because the surface is tiny.                      //
@@ -32,7 +20,7 @@ interface Anomaly {
   vehicle_id: string;
   timestamp: string;
   code: string;
-  detail: string | null;
+  detail: string;
 }
 
 interface ZoneCountsResponse {
@@ -63,70 +51,21 @@ const STATUS_DOT: Record<Status, string> = {
 };
 
 // --------------------------------------------------------------------------- //
-// Generic polling hook                                                        //
-// --------------------------------------------------------------------------- //
-
-/**
- * Poll a JSON endpoint every POLL_MS. The `cancelled` flag is essential —
- * without it, a slow fetch landing after unmount produces a
- * state-update-on-unmounted-component warning, and worse, can clobber state
- * with stale data after a re-mount under React StrictMode.
- *
- * onTick: called with the timestamp of every successful fetch — lets the
- * page-level "last updated" clock advance from any of the three polls.
- */
-function usePolledJson<T>(
-  path: string,
-  onTick?: (when: Date) => void,
-): { data: T | null; error: string | null } {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Keep the latest onTick reference accessible without retriggering the
-  // effect — the effect only depends on `path`.
-  const onTickRef = useRef(onTick);
-  onTickRef.current = onTick;
-
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const r = await fetch(`${API_BASE}${path}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = (await r.json()) as T;
-        if (!cancelled) {
-          setData(j);
-          setError(null);
-          onTickRef.current?.(new Date());
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      }
-    };
-    tick();
-    const id = setInterval(tick, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [path]);
-
-  return { data, error };
-}
-
-// --------------------------------------------------------------------------- //
 // <VehicleList /> — 50 rows with status dot, battery bar, recent anomaly     //
 // --------------------------------------------------------------------------- //
 
-function VehicleList({ onTick }: { onTick: (when: Date) => void }) {
+function VehicleList({
+  onTick,
+  anomalies,
+  anomaliesError,
+}: {
+  onTick: (when: Date) => void;
+  anomalies: Anomaly[] | null;
+  anomaliesError: string | null;
+}) {
   const { data: vehicles, error: vehErr } = usePolledJson<Vehicle[]>(
     '/vehicles',
     onTick,
-  );
-  // Larger limit so most-recent-per-vehicle lookups are reliable across a
-  // mixed-vehicle anomaly stream. /anomalies caps at 1000 server-side.
-  const { data: anomalies, error: anomErr } = usePolledJson<Anomaly[]>(
-    '/anomalies?limit=200',
   );
 
   // Most-recent anomaly per vehicle, computed client-side from the descending
@@ -148,9 +87,9 @@ function VehicleList({ onTick }: { onTick: (when: Date) => void }) {
           {vehicles ? `${vehicles.length} rows` : 'loading…'}
         </span>
       </header>
-      {(vehErr || anomErr) && (
+      {(vehErr || anomaliesError) && (
         <div className="px-4 py-2 text-sm text-red-700 bg-red-50 border-b border-red-200">
-          {vehErr ?? anomErr}
+          {vehErr ?? anomaliesError}
         </div>
       )}
       <div className="overflow-x-auto max-h-[640px] overflow-y-auto">
@@ -249,20 +188,29 @@ function ZoneCounts({ onTick }: { onTick: (when: Date) => void }) {
     onTick,
   );
 
-  // Track previous counts to highlight a card on the render where its value
-  // changed. We compare current data to the snapshot stored on the previous
-  // render, then update the ref so the next render compares against `data`.
-  const prevRef = useRef<Record<string, number>>({});
+  // Highlight cards whose count changed on the latest poll. We diff inside
+  // the effect (ref read/write outside render — satisfies react-hooks/refs)
+  // and stash the result in `changed` state, which persists until the next
+  // poll either resets or refreshes it.
   const counts = data?.counts ?? {};
-  const prev = prevRef.current;
-  const changed = new Set<string>();
-  for (const [zone, value] of Object.entries(counts)) {
-    if (prev[zone] !== undefined && prev[zone] !== value) {
-      changed.add(zone);
+  const prevRef = useRef<Record<string, number>>({});
+  const [changed, setChanged] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!data) return;
+    const next = new Set<string>();
+    for (const [zone, value] of Object.entries(data.counts)) {
+      const prior = prevRef.current[zone];
+      if (prior !== undefined && prior !== value) {
+        next.add(zone);
+      }
     }
-  }
-  // Snapshot for the next tick comparison.
-  prevRef.current = { ...counts };
+    prevRef.current = { ...data.counts };
+    // `next` is derived from a cross-render diff (data vs. prevRef), which is
+    // not expressible as pure render-time state — hence the suppressed rule.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setChanged(next);
+  }, [data]);
 
   // Sorted zone IDs for stable layout.
   const zones = Object.keys(counts).sort();
@@ -309,11 +257,16 @@ function ZoneCounts({ onTick }: { onTick: (when: Date) => void }) {
 // <AnomalyFeed /> — 20 most recent anomalies                                  //
 // --------------------------------------------------------------------------- //
 
-function AnomalyFeed({ onTick }: { onTick: (when: Date) => void }) {
-  const { data, error } = usePolledJson<Anomaly[]>(
-    '/anomalies?limit=20',
-    onTick,
-  );
+function AnomalyFeed({
+  anomalies,
+  error,
+}: {
+  anomalies: Anomaly[] | null;
+  error: string | null;
+}) {
+  // Render at most 20 rows — the parent feeds us the full 200-row poll so
+  // we don't duplicate the /anomalies request.
+  const data = anomalies ? anomalies.slice(0, 20) : null;
 
   return (
     <section className="bg-white rounded shadow-sm border border-slate-200">
@@ -351,7 +304,7 @@ function AnomalyFeed({ onTick }: { onTick: (when: Date) => void }) {
               {a.code}
             </span>
             <span className="text-slate-600 text-xs flex-1 truncate">
-              {a.detail ?? ''}
+              {a.detail}
             </span>
           </li>
         ))}
@@ -366,6 +319,13 @@ function AnomalyFeed({ onTick }: { onTick: (when: Date) => void }) {
 
 function App() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // Single anomalies poll for both the per-vehicle latest badge and the
+  // recent-events feed (F-007). 200 is large enough to give VehicleList a
+  // reliable most-recent-per-vehicle lookup; AnomalyFeed renders the top 20.
+  const { data: anomalies, error: anomaliesError } = usePolledJson<Anomaly[]>(
+    '/anomalies?limit=200',
+    setLastUpdated,
+  );
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -394,10 +354,14 @@ function App() {
       </header>
       <main className="max-w-7xl mx-auto p-4 grid gap-4 md:grid-cols-2">
         <div className="md:col-span-2">
-          <VehicleList onTick={setLastUpdated} />
+          <VehicleList
+            onTick={setLastUpdated}
+            anomalies={anomalies}
+            anomaliesError={anomaliesError}
+          />
         </div>
         <ZoneCounts onTick={setLastUpdated} />
-        <AnomalyFeed onTick={setLastUpdated} />
+        <AnomalyFeed anomalies={anomalies} error={anomaliesError} />
       </main>
     </div>
   );

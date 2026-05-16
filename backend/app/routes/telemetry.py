@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Union
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -42,15 +41,26 @@ logger = logging.getLogger(__name__)
 
 @router.post("/telemetry")
 def post_telemetry(
-    payload: Union[TelemetryEventIn, List[TelemetryEventIn]],
+    payload: TelemetryEventIn | list[TelemetryEventIn],
     session: Session = Depends(get_session),
 ):
     events: list[TelemetryEventIn] = (
         payload if isinstance(payload, list) else [payload]
     )
 
+    # Stage cache updates until the transaction commits — a rollback must
+    # not leave a ghost prior in the in-memory cache (F-005).
+    cache_updates: list[tuple[str, float, str]] = []
+
     try:
         for event in events:
+            # 0. Hydrate the per-vehicle anomaly cache from the DB on first
+            #    sight (ADR §2). MUST run before the upsert below — otherwise
+            #    the SELECT sees the row we're about to write and seeds the
+            #    cache with the current event's battery, defeating
+            #    `battery_drop` for the post-restart event.
+            anomaly.hydrate(event.vehicle_id, session)
+
             # 1. Raw telemetry row.
             session.add(
                 TelemetryEvent(
@@ -107,7 +117,8 @@ def post_telemetry(
                         event.vehicle_id,
                     )
 
-            # 4. Anomaly evaluation.
+            # 4. Anomaly evaluation. Pure function — cache write is deferred
+            #    until after commit (see step 5).
             for a in anomaly.evaluate(event.model_dump()):
                 session.add(
                     Anomaly(
@@ -117,10 +128,17 @@ def post_telemetry(
                         detail=a["detail"],
                     )
                 )
+            cache_updates.append(
+                (event.vehicle_id, event.battery_pct, event.timestamp)
+            )
 
         session.commit()
     except Exception:
         session.rollback()
         raise
+
+    # 5. Now that the transaction is durable, update the anomaly cache.
+    for vid, pct, ts in cache_updates:
+        anomaly.remember(vid, pct, ts)
 
     return JSONResponse({"accepted": len(events)}, status_code=202)

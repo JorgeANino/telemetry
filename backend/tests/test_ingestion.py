@@ -51,6 +51,19 @@ def test_zone_entered_increments_count(client, session):
     assert row.entry_count == 1
 
 
+def test_empty_vehicle_id_rejected_with_422(client):
+    """F-015: vehicle_id must match `^v-\\d{2,4}$`."""
+    bad = _event(vehicle_id="")
+    r = client.post("/telemetry", json=bad)
+    assert r.status_code == 422
+
+
+def test_arbitrary_vehicle_id_rejected_with_422(client):
+    bad = _event(vehicle_id="not-a-vehicle")
+    r = client.post("/telemetry", json=bad)
+    assert r.status_code == 422
+
+
 def test_unknown_zone_logged_but_not_error(client, session):
     r = client.post("/telemetry", json=_event(zone_entered="nonexistent_zone"))
     assert r.status_code == 202

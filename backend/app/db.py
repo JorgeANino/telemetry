@@ -11,9 +11,9 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
-# Repo-root-relative path. `__file__` is backend/app/db.py, so parents[2] is the
-# repo root. We then place the DB at backend/telemetry.db.
-DB_PATH = Path(__file__).resolve().parents[2] / "backend" / "telemetry.db"
+# DB lives next to the `app` package: `backend/telemetry.db`.
+# `__file__` is backend/app/db.py, so parents[1] is backend/.
+DB_PATH = Path(__file__).resolve().parents[1] / "telemetry.db"
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",

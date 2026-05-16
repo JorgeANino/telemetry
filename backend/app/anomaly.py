@@ -14,6 +14,9 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
 BATTERY_DROP_THRESHOLD_PP = 20
 OVERSPEED_MPS = 5.0
 
@@ -23,25 +26,53 @@ _last_event_lock = threading.Lock()
 _last_event: dict[str, dict] = {}
 
 
+def hydrate(vehicle_id: str, session: Session) -> None:
+    """Lazily seed the cache from `vehicles` on first sight of a vehicle.
+
+    Without this, the first telemetry event after every process restart
+    silently skips `battery_drop` for that vehicle — the comparison falls
+    through `prior_snapshot is None`. We use `setdefault` under the lock so
+    a real event already processed by another thread always wins.
+    """
+    with _last_event_lock:
+        if vehicle_id in _last_event:
+            return
+    row = session.execute(
+        text(
+            "SELECT battery_pct, last_timestamp "
+            "FROM vehicles WHERE vehicle_id = :v"
+        ),
+        {"v": vehicle_id},
+    ).first()
+    if row is None or row.battery_pct is None or row.last_timestamp is None:
+        return
+    with _last_event_lock:
+        _last_event.setdefault(
+            vehicle_id,
+            {"battery_pct": row.battery_pct, "timestamp": row.last_timestamp},
+        )
+
+
 def evaluate(event: dict[str, Any]) -> list[dict[str, str]]:
     """Evaluate the four anomaly rules against a single event.
 
     `event` is a Pydantic-validated `TelemetryEventIn` dumped to a dict.
     Returns a list of `{"code", "detail"}` dicts — empty list if the event
-    is clean. Side-effect: updates the in-process last-event cache.
+    is clean. **Pure** — no cache mutation. Callers must call `remember(...)`
+    after the surrounding DB transaction commits so a rollback never leaves
+    a ghost prior in the cache (F-005).
     """
     anomalies: list[dict[str, str]] = []
 
     vehicle_id: str = event["vehicle_id"]
     curr_pct: float = event["battery_pct"]
-    curr_ts: str = event["timestamp"]
     speed_mps: float = event["speed_mps"]
     error_codes: list[str] = event.get("error_codes") or []
     status: str = event["status"]
 
     # --- battery_drop -----------------------------------------------------
-    # Compare against cached prior. We snapshot the prior under the lock so
-    # the read is consistent with concurrent updates from other threads.
+    # Compare against cached prior. We snapshot under the lock so the read
+    # is consistent with concurrent updates from other threads.
     with _last_event_lock:
         prior = _last_event.get(vehicle_id)
         prior_snapshot = dict(prior) if prior is not None else None
@@ -72,18 +103,23 @@ def evaluate(event: dict[str, Any]) -> list[dict[str, str]]:
     if status == "fault":
         anomalies.append({"code": "status_fault", "detail": ""})
 
-    # Update cache only if this event is newer than what we have. ISO-8601
-    # timestamps compare correctly lexicographically, so out-of-order events
-    # cannot poison the prior.
+    return anomalies
+
+
+def remember(vehicle_id: str, battery_pct: float, timestamp: str) -> None:
+    """Record a vehicle's latest battery reading in the in-process cache.
+
+    Must only be called after the surrounding DB transaction commits.
+    Out-of-order events are rejected via lex-compare on the ISO-8601
+    timestamp so a late-arriving older event cannot poison the prior.
+    """
     with _last_event_lock:
         existing = _last_event.get(vehicle_id)
-        if existing is None or curr_ts > existing["timestamp"]:
+        if existing is None or timestamp > existing["timestamp"]:
             _last_event[vehicle_id] = {
-                "battery_pct": curr_pct,
-                "timestamp": curr_ts,
+                "battery_pct": battery_pct,
+                "timestamp": timestamp,
             }
-
-    return anomalies
 
 
 def _reset_cache_for_tests() -> None:

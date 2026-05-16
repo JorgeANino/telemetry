@@ -13,13 +13,13 @@ equivalent ORM construction.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..db import get_session
+from ..schemas import _to_utc_iso
 from ..zones import ZONES
 
 router = APIRouter(tags=["reads"])
@@ -34,9 +34,9 @@ _DEFAULT_ANOMALY_WINDOW = timedelta(hours=1)
 
 @router.get("/anomalies")
 def get_anomalies(
-    vehicle_id: Optional[str] = None,
-    from_: Optional[str] = Query(None, alias="from"),
-    to: Optional[str] = None,
+    vehicle_id: str | None = None,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
     session: Session = Depends(get_session),
 ):
@@ -49,21 +49,29 @@ def get_anomalies(
     clauses: list[str] = []
     params: dict[str, object] = {"limit": limit}
 
+    # Normalise bounds to canonical UTC so the lex-compare against stored
+    # timestamps matches regardless of the client's offset (F-004).
+    try:
+        from_norm = _to_utc_iso(from_) if from_ is not None else None
+        to_norm = _to_utc_iso(to) if to is not None else None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
     # Apply the 1-hour default ONLY when neither bound is supplied. If the
     # caller passed one bound, we trust them and do not synthesize the other.
-    if from_ is None and to is None:
+    if from_norm is None and to_norm is None:
         default_from = (
             datetime.now(timezone.utc) - _DEFAULT_ANOMALY_WINDOW
         ).isoformat()
         clauses.append("timestamp >= :from_")
         params["from_"] = default_from
     else:
-        if from_ is not None:
+        if from_norm is not None:
             clauses.append("timestamp >= :from_")
-            params["from_"] = from_
-        if to is not None:
+            params["from_"] = from_norm
+        if to_norm is not None:
             clauses.append("timestamp <= :to")
-            params["to"] = to
+            params["to"] = to_norm
 
     if vehicle_id is not None:
         clauses.append("vehicle_id = :vehicle_id")

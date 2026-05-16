@@ -217,9 +217,10 @@ def test_anomalies_filter_by_time_range(client):
     # Default window (last 1h) should not see it.
     assert client.get("/anomalies").json() == []
 
-    # Explicit wide window should.
+    # Explicit wide window should. `+` must be URL-encoded as %2B so the
+    # query parser doesn't decode it to a space.
     rows = client.get(
-        "/anomalies?from=2019-01-01T00:00:00+00:00&to=2021-01-01T00:00:00+00:00"
+        "/anomalies?from=2019-01-01T00:00:00%2B00:00&to=2021-01-01T00:00:00%2B00:00"
     ).json()
     assert len(rows) == 1
     assert rows[0]["vehicle_id"] == "v-00"
@@ -246,3 +247,52 @@ def test_anomalies_limit_clamp(client):
 def test_anomalies_limit_rejects_invalid(client):
     assert client.get("/anomalies?limit=0").status_code == 422
     assert client.get("/anomalies?limit=10000").status_code == 422
+
+
+def test_non_utc_offset_event_is_visible_in_default_window(client):
+    """F-004: a client posting with a non-UTC offset must land inside the
+    default 1-hour window. Without boundary normalisation the lex-compare
+    against `now(UTC)-1h` silently excludes anything with a "-NN:NN" or
+    "+NN:NN" offset whose string sort order differs."""
+    # Build a "now-ish" moment expressed with a -05:00 offset.
+    now_utc = datetime.now(timezone.utc)
+    ts_eastern = now_utc.astimezone(timezone(timedelta(hours=-5))).isoformat()
+    assert ts_eastern.endswith("-05:00")
+
+    r = client.post(
+        "/telemetry",
+        json=_event(vehicle_id="v-00", timestamp=ts_eastern, speed_mps=7.5),
+    )
+    assert r.status_code == 202, r.text
+
+    rows = client.get("/anomalies").json()
+    assert any(row["code"] == "overspeed" and row["vehicle_id"] == "v-00" for row in rows), (
+        f"non-UTC event missing from default window: {rows}"
+    )
+
+
+def test_naive_timestamp_rejected_with_422(client):
+    """F-004: timestamps without a timezone must be rejected at the door."""
+    bad = _event(timestamp="2026-05-15T12:00:00")  # no offset
+    r = client.post("/telemetry", json=bad)
+    assert r.status_code == 422
+
+
+def test_anomalies_from_param_accepts_non_utc(client):
+    """F-004: the `from`/`to` query params must also normalise to UTC."""
+    # Seed an event roughly now (UTC).
+    ts = _now_iso()
+    assert (
+        client.post(
+            "/telemetry",
+            json=_event(vehicle_id="v-00", timestamp=ts, speed_mps=7.5),
+        ).status_code
+        == 202
+    )
+
+    # Query with a `from` bound 1 hour ago, expressed in -05:00.
+    from_eastern = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).astimezone(timezone(timedelta(hours=-5))).isoformat()
+    rows = client.get(f"/anomalies?from={from_eastern}").json()
+    assert any(row["code"] == "overspeed" for row in rows), rows

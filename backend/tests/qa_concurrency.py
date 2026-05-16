@@ -13,12 +13,14 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
 
 BASE_URL = "http://127.0.0.1:8765"
-DB_PATH = "/Users/jorgenino/Documents/telemetry/backend/telemetry.db"
+# Repo-relative path — matches the location written by `app.db.init_db()`.
+DB_PATH = str(Path(__file__).resolve().parents[1] / "telemetry.db")
 
 # Shared client config — generous timeouts because we expect contention.
 _TIMEOUT = httpx.Timeout(30.0)
@@ -179,8 +181,8 @@ def test_fault_transition_atomicity_live():
         f"maintenance_records={maint_count}"
     )
     print(
-        f"[Test 2] expected: status=fault status_version=1 "
-        f"cancelled_missions=1 maintenance_records=1"
+        "[Test 2] expected: status=fault status_version=1 "
+        "cancelled_missions=1 maintenance_records=1"
     )
 
     assert final_status == "fault", f"expected status=fault got {final_status}"
@@ -283,7 +285,7 @@ def test_fleet_state_consistency_under_writes():
     final = r_final.json()
     final_sum = sum(final.values())
     print(f"[Test 3] final fleet/state={final} sum={final_sum}")
-    print(f"[Test 3] snapshots (20 polls):")
+    print("[Test 3] snapshots (20 polls):")
     for i, s in enumerate(snapshots):
         print(f"  poll {i:02d}: sum={sum(s.values())} {s}")
 

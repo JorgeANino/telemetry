@@ -30,8 +30,10 @@ def _clean_cache():
 
 
 def test_battery_drop_fires_on_second_event():
-    # First event seeds the cache; should produce no anomaly on its own.
+    # First event seeds nothing (evaluate is pure); commit-side `remember`
+    # is what writes to the cache — we call it explicitly here.
     assert anomaly.evaluate(_event(battery_pct=90.0, timestamp="2026-05-15T12:00:00+00:00")) == []
+    anomaly.remember("v-01", 90.0, "2026-05-15T12:00:00+00:00")
     # Second event 30 pp lower -> battery_drop.
     out = anomaly.evaluate(_event(battery_pct=60.0, timestamp="2026-05-15T12:00:01+00:00"))
     codes = [a["code"] for a in out]
@@ -73,6 +75,7 @@ def test_status_fault_fires_when_status_is_fault():
 def test_multiple_rules_emit_multiple_rows():
     # Seed prior battery to trigger battery_drop on the next event.
     anomaly.evaluate(_event(battery_pct=95.0, timestamp="2026-05-15T12:00:00+00:00"))
+    anomaly.remember("v-01", 95.0, "2026-05-15T12:00:00+00:00")
     out = anomaly.evaluate(
         _event(
             battery_pct=50.0,
